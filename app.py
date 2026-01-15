@@ -120,3 +120,4 @@ if uploaded_file:
     # Podgląd tekstu (dla pewności co widzi robot)
     with st.expander("🔍 Zobacz co widzę w PDF"):
         st.text(text)
+
