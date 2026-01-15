@@ -1,0 +1,122 @@
+import streamlit as st
+import pandas as pd
+import pdfplumber
+import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# --- USTAWIENIA (Możesz zmieniać) ---
+PROG_KWOTOWY = 1000.00
+LIMIT_INTERWENCJI = 300.00
+
+# --- FUNKCJE ---
+def wyslij_maila(nazwa_pliku, kwota, brakuje, rekomendacja, email_nadawcy, haslo_nadawcy, email_odbiorcy):
+    msg = MIMEMultipart()
+    msg['From'] = email_nadawcy
+    msg['To'] = email_odbiorcy
+    msg['Subject'] = f"🔔 OKAZJA: Zamówienie na {kwota} zł - Brakuje {brakuje} zł!"
+    
+    body = f"""
+    Cześć! Przeanalizowałem plik: {nazwa_pliku}
+    
+    💰 Wartość zamówienia: {kwota} zł
+    📉 Brakuje do progu (1000 zł): {brakuje} zł
+    
+    (Różnica jest mniejsza niż {LIMIT_INTERWENCJI} zł - warto dzwonić!)
+    
+    💡 REKOMENDACJA:
+    {rekomendacja}
+    """
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(email_nadawcy, haslo_nadawcy)
+        server.sendmail(email_nadawcy, email_odbiorcy, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Błąd wysyłki maila: {e}")
+        return False
+
+def analizuj_pdf(uploaded_file):
+    text = ""
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text()
+    return text
+
+# --- UI APLIKACJI ---
+st.set_page_config(page_title="GEKO Szybki Start", page_icon="⚡")
+st.title("⚡ GEKO - Szybka Analiza")
+st.write("Wrzuć fakturę, a ja sprawdzę, czy brakuje do 1000 zł.")
+
+# Pobieranie haseł (dla bezpieczeństwa)
+try:
+    EMAIL_NADAWCY = st.secrets["EMAIL_NADAWCY"]
+    HASLO_NADAWCY = st.secrets["HASLO_NADAWCY"]
+    EMAIL_ODBIORCY = st.secrets["EMAIL_ODBIORCY"]
+except:
+    EMAIL_NADAWCY = "" # Żeby się nie wywaliło, jak nie ma haseł
+
+uploaded_file = st.file_uploader("📂 Wrzuć plik PDF", type="pdf")
+
+if uploaded_file:
+    # 1. Czytamy plik
+    text = analizuj_pdf(uploaded_file)
+    
+    # 2. Szukamy kwoty (szuka "Razem netto" lub największej kwoty w pliku)
+    # To jest prosty mechanizm - szuka liczb z przecinkiem i bierze największą jako sumę
+    kwoty = re.findall(r"(\d+[\.,]\d{2})\s?PLN", text)
+    if not kwoty:
+        # Próba innego formatu (bez PLN)
+        kwoty = re.findall(r"(\d+[\.,]\d{2})", text)
+        
+    if kwoty:
+        # Zamieniamy przecinki na kropki i szukamy max
+        wartosc_netto = max([float(k.replace(',', '.').replace(' ', '')) for k in kwoty])
+    else:
+        wartosc_netto = 0.0
+        st.warning("Nie znalazłem kwoty automatycznie. Sprawdź czy PDF jest czytelny.")
+
+    # Wyświetlamy wynik
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.metric("Znaleziona kwota netto", f"{wartosc_netto:.2f} zł")
+    
+    # 3. Logika 300 zł
+    brakujaca = PROG_KWOTOWY - wartosc_netto
+    
+    with col2:
+        if wartosc_netto >= PROG_KWOTOWY:
+            st.success("✅ Próg 1000 zł osiągnięty! Klient ma gratis.")
+        elif 0 < brakujaca <= LIMIT_INTERWENCJI:
+            st.error("🔥 ALARM! BRAKUJE MAŁO!")
+            st.write(f"Do progu brakuje: **{brakujaca:.2f} zł**")
+            st.write(f"(To mniej niż {LIMIT_INTERWENCJI} zł)")
+            
+            rekomendacja = "Domów: Ostrzałka do łańcuchów (G81207) lub chemia warsztatowa."
+            st.info(f"💡 Podpowiedź: {rekomendacja}")
+            
+            # Przycisk maila
+            if st.button("📧 Wyślij mi powiadomienie"):
+                if EMAIL_NADAWCY:
+                    sukces = wyslij_maila(uploaded_file.name, f"{wartosc_netto:.2f}", f"{brakujaca:.2f}", rekomendacja, EMAIL_NADAWCY, HASLO_NADAWCY, EMAIL_ODBIORCY)
+                    if sukces:
+                        st.toast("Mail wysłany!", icon="🚀")
+                else:
+                    st.error("Nie ustawiłeś haseł w 'Secrets'!")
+                    
+        elif brakujaca > LIMIT_INTERWENCJI:
+            st.warning("Spokojnie.")
+            st.write(f"Brakuje aż **{brakujaca:.2f} zł**.")
+            st.write("Powyżej limitu 300 zł -> Nie dzwonimy.")
+        else:
+            st.error("Coś nie tak z kwotą (0 zł?).")
+
+    # Podgląd tekstu (dla pewności co widzi robot)
+    with st.expander("🔍 Zobacz co widzę w PDF"):
+        st.text(text)
