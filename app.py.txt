@@ -1,0 +1,232 @@
+import streamlit as st
+import pdfplumber
+import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+# ==========================================
+# ⚙️ KONFIGURACJA I BAZA WIEDZY (EDYCJA)
+# ==========================================
+
+# 1. PROGI KWOTOWE (Zasady z Gazetki Styczeń)
+PROG_KWOTOWY = 1000.00
+NAGRODA_ZA_PROG = "Bluza Polarowa za 1 zł"
+LIMIT_INTERWENCJI = 300.00  # Twoja złota zasada (nie dzwonimy powyżej tej kwoty)
+
+# 2. INTELIGENTNE REGUŁY (Cross-selling)
+# Jeśli system znajdzie słowo KLUCZ w fakturze, zaproponuje PRODUKT.
+INTELIGENTNE_REGULY = {
+    "Prowadnica": {
+        "produkt": "Ostrzałka elektr. do łańcuchów (G81207)", 
+        "cena": 79.29, 
+        "opis": "Klient serwisuje piły - ostrzałka to pewniak."
+    },
+    "Łańcuch": {
+        "produkt": "Olej do smarowania łańcuchów (G82000)", 
+        "cena": 19.99, 
+        "opis": "Do łańcucha zawsze potrzebny jest olej."
+    },
+    "Wykrętaki": {
+        "produkt": "Zestaw gwintowników i narzynek 32el (G38301)", 
+        "cena": 50.89, 
+        "opis": "Po wykręcaniu zerwanych śrub często trzeba poprawić gwint."
+    },
+    "Nagrzewnica": {
+        "produkt": "Druga sztuka do pary (Rabat Wielosztuka!)", 
+        "cena": 164.76, 
+        "opis": "Sprawdź gazetkę '2026AB' - przy 2 sztukach cena spada!"
+    },
+    "Tarcza": {
+        "produkt": "Rękawice robocze Wampirki (Pakiet 10 par)", 
+        "cena": 25.00, 
+        "opis": "Tarcze i rękawice to towary zużywalne - warto domówić."
+    },
+    "Prostownik": {
+        "produkt": "Kable rozruchowe 600A (G02400)",
+        "cena": 35.50,
+        "opis": "Zestaw zimowy: prostownik + kable."
+    },
+     "Siekiera": {
+        "produkt": "Ostrzałka do noży i siekier 2w1 (T02-009)",
+        "cena": 15.00,
+        "opis": "Małe, tanie, a pasuje idealnie do siekiery."
+    }
+}
+
+# Domyślna propozycja, jak nic innego nie pasuje
+DOMYSLNA_REKOMENDACJA = {
+    "produkt": "Chemia warsztatowa / Zmywacze",
+    "cena": 0,
+    "opis": "Uniwersalny produkt, żeby dobić do progu."
+}
+
+# ==========================================
+# 🔧 FUNKCJE SYSTEMOWE
+# ==========================================
+
+def wyslij_maila(nazwa_pliku, dane, rekomendacja, email_nadawcy, haslo_nadawcy, email_odbiorcy):
+    msg = MIMEMultipart()
+    msg['From'] = email_nadawcy
+    msg['To'] = email_odbiorcy
+    msg['Subject'] = f"🔔 OKAZJA: Brakuje {dane['brakuje']:.2f} zł! ({dane['klient']})"
+    
+    body = f"""
+    Cześć! Raport z Asystenta Sprzedaży GEKO.
+    
+    📄 Plik: {nazwa_pliku}
+    👤 Klient (NIP): {dane['nip']}
+    
+    💰 WARTOŚĆ ZAMÓWIENIA: {dane['netto']:.2f} zł
+    📉 BRAKUJE DO PROGU ({PROG_KWOTOWY} zł): {dane['brakuje']:.2f} zł
+    
+    💡 CO PROPONOWAĆ:
+    👉 Produkt: {rekomendacja['produkt']}
+    👉 Argument: {rekomendacja['opis']}
+    
+    Działaj!
+    Twój Bot
+    """
+    msg.attach(MIMEText(body, 'plain'))
+    
+    try:
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.starttls()
+        server.login(email_nadawcy, haslo_nadawcy)
+        server.sendmail(email_nadawcy, email_odbiorcy, msg.as_string())
+        server.quit()
+        return True
+    except Exception as e:
+        st.error(f"Błąd wysyłki maila: {e}")
+        return False
+
+def analizuj_pdf(uploaded_file):
+    text = ""
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text()
+    return text
+
+def znajdz_kwote_i_nip(text):
+    # 1. Szukanie kwoty (szuka formatów: 123,45 PLN lub 123.45)
+    kwoty = re.findall(r"(\d+[\.,]\d{2})\s?PLN", text)
+    if not kwoty:
+        kwoty = re.findall(r"(\d+[\.,]\d{2})", text)
+    
+    wartosc_netto = 0.0
+    if kwoty:
+        # Zamiana przecinków na kropki, usuwanie spacji
+        wartosc_netto = max([float(k.replace(',', '.').replace(' ', '')) for k in kwoty])
+
+    # 2. Szukanie NIP (ciąg 10 cyfr, omijamy nasz własny NIP)
+    nipy = re.findall(r'\d{10}', text.replace('-', ''))
+    moj_nip = "7722420459" # NIP GEKO
+    klient_nip = "Brak NIP"
+    
+    for n in nipy:
+        if n != moj_nip:
+            klient_nip = n
+            break
+            
+    # Próba znalezienia nazwy klienta (bardzo uproszczona)
+    klient_nazwa = "Nieznany Klient"
+    if "Nabywca" in text:
+        try:
+            parts = text.split("Nabywca")
+            klient_nazwa = parts[1].splitlines()[1][:30] + "..."
+        except:
+            pass
+
+    return wartosc_netto, klient_nip, klient_nazwa
+
+def dopasuj_rekomendacje(text):
+    znalezione = []
+    for slowo, regula in INTELIGENTNE_REGULY.items():
+        if slowo.lower() in text.lower(): # Wielkość liter nie ma znaczenia
+            znalezione.append(regula)
+    
+    if znalezione:
+        return znalezione[0] # Zwraca pierwszą pasującą
+    else:
+        return DOMYSLNA_REKOMENDACJA
+
+# ==========================================
+# 📱 INTERFEJS APLIKACJI (STREAMLIT)
+# ==========================================
+
+st.set_page_config(page_title="GEKO Asystent PRO", page_icon="🚀", layout="centered")
+
+# Pobieranie haseł z Secrets (ukryte przed światem)
+try:
+    EMAIL_NADAWCY = st.secrets["EMAIL_NADAWCY"]
+    HASLO_NADAWCY = st.secrets["HASLO_NADAWCY"]
+    EMAIL_ODBIORCY = st.secrets["EMAIL_ODBIORCY"]
+except:
+    st.warning("⚠️ Brak konfiguracji haseł! Aplikacja nie wyśle maila.")
+    EMAIL_NADAWCY = None
+
+# Nagłówek
+st.title("🚀 GEKO Sales Booster")
+st.markdown("Twoja tajna broń do faktur i promocji.")
+st.markdown("---")
+
+# Wgrywanie pliku
+uploaded_file = st.file_uploader("📸 Wrzuć PDF z zamówieniem", type="pdf")
+
+if uploaded_file:
+    with st.spinner("Analizuję fakturę... 🕵️‍♂️"):
+        text = analizuj_pdf(uploaded_file)
+        netto, nip, nazwa = znajdz_kwote_i_nip(text)
+        rekomendacja = dopasuj_rekomendacje(text)
+        brakujaca = PROG_KWOTOWY - netto
+
+    # Wyświetlanie wyników
+    col1, col2 = st.columns(2)
+    with col1:
+        st.info("📋 Dane zamówienia")
+        st.write(f"**Klient:** {nazwa}")
+        st.write(f"**NIP:** {nip}")
+        st.metric("Kwota Netto", f"{netto:.2f} zł")
+    
+    with col2:
+        st.info("📊 Status Promocji")
+        st.write(f"Cel: **{PROG_KWOTOWY} zł** ({NAGRODA_ZA_PROG})")
+        if netto >= PROG_KWOTOWY:
+            st.success("✅ ZROBIONE! Próg osiągnięty.")
+        else:
+            st.warning(f"Brakuje: **{brakujaca:.2f} zł**")
+
+    st.markdown("---")
+
+    # LOGIKA DECYZYJNA
+    if netto >= PROG_KWOTOWY:
+        st.balloons()
+        st.success("🎉 Klient ma już gratis. Nic nie musisz robić.")
+
+    elif brakujaca > LIMIT_INTERWENCJI:
+        st.warning(f"⛔ Różnica jest zbyt duża (> {LIMIT_INTERWENCJI} zł).")
+        st.write("Szkoda czasu na telefon. Odpuszczamy.")
+
+    elif 0 < brakujaca <= LIMIT_INTERWENCJI:
+        st.error("🔥 ALARM! OKAZJA DO UPSELLINGU!")
+        st.markdown(f"### Brakuje tylko: {brakujaca:.2f} zł")
+        
+        # Sekcja rekomendacji
+        st.success("💡 MOJA SUGESTIA:")
+        st.markdown(f"**Proponuj:** {rekomendacja['produkt']}")
+        st.markdown(f"**Dlaczego:** *{rekomendacja['opis']}*")
+        if rekomendacja['cena'] > 0:
+            st.markdown(f"**Cena:** ok. {rekomendacja['cena']} zł")
+
+        # Przycisk akcji
+        st.markdown("---")
+        if st.button("📧 Wyślij mi raport na maila"):
+            if EMAIL_NADAWCY:
+                dane_do_maila = {"netto": netto, "brakuje": brakujaca, "nip": nip, "klient": nazwa}
+                sukces = wyslij_maila(uploaded_file.name, dane_do_maila, rekomendacja, EMAIL_NADAWCY, HASLO_NADAWCY, EMAIL_ODBIORCY)
+                if sukces:
+                    st.toast("Mail wysłany! Sprawdź telefon.", icon="📨")
+                else:
+                    st.error("Wysyłka nieudana. Sprawdź hasła.")
+            else:
+                st.error("Nie skonfigurowałeś haseł w Secrets!")
