@@ -230,3 +230,4 @@ if uploaded_file:
                     st.error("Wysyłka nieudana. Sprawdź hasła.")
             else:
                 st.error("Nie skonfigurowałeś haseł w Secrets!")
+
